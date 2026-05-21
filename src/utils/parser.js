@@ -1,43 +1,56 @@
 /**
- * Extracts Length, Width, and CF value from specification strings.
- * Format: L × W × CF (e.g., "1200 x 600 x 50")
+ * Parses raw dimension strings from the fabrication BOM.
+ * Handles manual draftsman variations: e.g., "1200 x 600 x 50", "1200*600", or "1200×600".
+ * 
+ * @param {string} spec - Raw specification string
+ * @returns {object|null} Parsed dimensions in mm: { originalL, originalW, cf }
  */
 export function parseSpecification(spec) {
   if (!spec || typeof spec !== "string") return null;
 
-  // Clean the string: replace different multiplication symbols and remove spaces
-  const cleaned = spec.toLowerCase().replace(/[×x*]/g, "x").replace(/\s+/g, "");
+  // Normalize delimiters (shop drawings sometimes mix x, *, and Unicode × symbols)
+  const normalized = spec.toLowerCase().replace(/[×x*]/g, "x").replace(/\s+/g, "");
   
-  // Match L x W x CF or just L x W
-  const parts = cleaned.split("x");
+  // Split into components (Length x Width x Bending Loss / CF)
+  const tokens = normalized.split("x");
+  if (tokens.length < 2) return null;
+
+  const length = parseFloat(tokens[0]);
+  const width = parseFloat(tokens[1]);
   
-  if (parts.length < 2) return null;
+  // CF (Bending Loss/Allowance) is optional; default to 0 if not bent
+  const bendingLoss = tokens.length > 2 ? parseFloat(tokens[2]) : 0;
 
-  const L = parseFloat(parts[0]);
-  const W = parseFloat(parts[1]);
-  const CF = parts.length > 2 ? parseFloat(parts[2]) : 0;
+  if (isNaN(length) || isNaN(width)) {
+    return null; // Skip malformed rows
+  }
 
-  if (isNaN(L) || isNaN(W)) return null;
-
+  // TODO: Add support for fractional input formats (e.g. 1200.5) if requested by engineering
   return { 
-    originalL: L, 
-    originalW: W, 
-    cf: isNaN(CF) ? 0 : CF 
+    originalL: length, 
+    originalW: width, 
+    cf: isNaN(bendingLoss) ? 0 : bendingLoss 
   };
 }
 
 /**
- * Applies manufacturing margins and calculates adjusted dimensions.
- * L_adj = L + CF + 12 (TRR) + 6 (Laser) = L + CF + 18
+ * Calculates adjusted cutting dimensions incorporating manufacturing allowances.
+ * Formula: Adjusted = Raw Dimension + Bending Loss (CF) + Margin
+ * 
+ * Margin is 15mm:
+ * - 12mm clamping allowance for the TRR machine
+ * - 3mm kerf / lead-in allowance for the CNC laser/plasma torch
  */
 export function calculateAdjustedDimensions(parsedSpec) {
   if (!parsedSpec) return null;
 
-  const MARGIN = 12 + 3; // TRR + Laser (Updated to 3mm)
+  // Clamping tolerance (12mm) + Laser lead-in/kerf (3mm)
+  const MANUFACTURING_ALLOWANCE = 12 + 3; 
   
-  const adjustedL = parsedSpec.originalL + parsedSpec.cf + MARGIN;
-  const adjustedW = parsedSpec.originalW + parsedSpec.cf + MARGIN;
+  const adjustedL = parsedSpec.originalL + parsedSpec.cf + MANUFACTURING_ALLOWANCE;
+  const adjustedW = parsedSpec.originalW + parsedSpec.cf + MANUFACTURING_ALLOWANCE;
   
+  // TODO: In the future, check if sheet grain direction matters for bending load-bearing parts
   return {
     ...parsedSpec,
     adjustedL,

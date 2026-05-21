@@ -1,11 +1,13 @@
 import { parseSpecification, calculateAdjustedDimensions } from "./utils/parser.js";
 import { NestingEngine } from "./engine/nester.js";
-
 import XLSX from "xlsx";
+
 const { readFile, utils } = XLSX;
 
 /**
- * Main Controller for Industrial Sheet Optimization
+ * OptimizationController
+ * Coordinates BOM importing from Excel, applies material/bending tolerances,
+ * triggers 2D nesting routines, and aggregates procurement recommendations.
  */
 export class OptimizationController {
   constructor() {
@@ -13,7 +15,9 @@ export class OptimizationController {
   }
 
   /**
-   * Processes an Excel file directly.
+   * Reads target Excel worksheet and triggers optimization pipeline.
+   * 
+   * @param {string} filePath - Absolute path to XLSX file
    */
   async processExcel(filePath) {
     const workbook = readFile(filePath);
@@ -23,13 +27,15 @@ export class OptimizationController {
   }
 
   /**
-   * Processes a list of raw components from Excel.
+   * Prepares raw part records and runs the 2D sheet packing pipeline.
+   * 
+   * @param {Array} rawData - Parsed rows from the BOM
    */
   async processComponents(rawData) {
     console.log(`Processing ${rawData.length} components...`);
 
-    // 1. Extraction & Margin Application
-    const processed = rawData.map(item => {
+    // Parse dimension specs and add fabrication margins
+    const rawParts = rawData.map((item, index) => {
       const parsed = parseSpecification(item["Child Item Specification"]);
       const adjusted = calculateAdjustedDimensions(parsed);
       
@@ -39,35 +45,39 @@ export class OptimizationController {
         ...item,
         ...adjusted,
         originalSpec: item["Child Item Specification"],
-        qty: parseInt(item["Total Child Item Qty"]) || 0
+        qty: parseInt(item["Total Child Item Qty"]) || 0,
+        originalIndex: index + 1
       };
     }).filter(Boolean);
 
-    // 2. Individual Sheet Recommendation (Step 3)
-    processed.forEach(item => {
+    // Assign fallback standalone raw plate recommendation for each item
+    rawParts.forEach(item => {
       item.recommendedSheet = this.nester.recommendBestSheetForPart(item);
     });
 
-    // 3. Nesting Optimization (Step 4)
-    const nestedSheets = this.nester.nest(processed);
+    // Run nesting packer to group components into optimized layouts
+    const nestedSheets = this.nester.nest(rawParts);
 
-    // 3. Generate Final Reports
-    return this.generateReports(processed, nestedSheets);
+    return this.generateReports(rawParts, nestedSheets);
   }
 
-  generateReports(processed, nestedSheets) {
-    // Grouping by Project
-    const projectGroups = {};
-    processed.forEach(p => {
+  /**
+   * Aggregates nesting calculations into localized project summaries and procurement tables.
+   */
+  generateReports(rawParts, nestedSheets) {
+    const groupedProjects = {};
+    
+    // Group components back by their designated Project ID
+    rawParts.forEach(p => {
       const pid = p["Project ID"] || "UNKNOWN";
-      if (!projectGroups[pid]) {
-        projectGroups[pid] = {
+      if (!groupedProjects[pid]) {
+        groupedProjects[pid] = {
           id: pid,
           name: p["Project Name"] || "Unnamed Project",
           parts: []
         };
       }
-      projectGroups[pid].parts.push(p);
+      groupedProjects[pid].parts.push(p);
     });
 
     const report = {
@@ -79,37 +89,87 @@ export class OptimizationController {
       }
     };
 
-    Object.values(projectGroups).forEach(group => {
+    Object.values(groupedProjects).forEach(group => {
+      // Find all nested sheets that contain parts from this specific project group
       const projectSheets = nestedSheets.filter(s => 
         s.parts.some(p => p["Project ID"] === group.id)
       );
 
-      const procurement = projectSheets.reduce((acc, s) => {
+      // Summarize recommended sheet purchases
+      const procureSummary = projectSheets.reduce((acc, s) => {
         const key = `${s.width} × ${s.length}`;
         acc[key] = (acc[key] || 0) + 1;
         return acc;
       }, {});
 
-      const procurementLines = Object.entries(procurement)
+      const procurementLines = Object.entries(procureSummary)
         .map(([size, count]) => `- ${size}: ${count} sheet(s)`)
         .join("\n");
+
+      const sheetLayoutDetails = projectSheets.map((s, idx) => {
+        const partCounts = {};
+        s.parts.forEach(p => {
+          const key = `[Item #${p.originalIndex}] ${p["Child Item Category"]} (${p.originalSpec})`;
+          partCounts[key] = (partCounts[key] || 0) + 1;
+        });
+
+        const partDetails = Object.entries(partCounts)
+          .map(([name, qty]) => `${name} × ${qty}`)
+          .join(", ");
+
+        return {
+          "Sheet No.": idx + 1,
+          "Sheet Size": `${s.width} × ${s.length}`,
+          "Nested Components & Quantities": partDetails
+        };
+      });
+
+      const sheets = projectSheets.map((s, idx) => {
+        const partCounts = {};
+        s.parts.forEach(p => {
+          const key = `[Item #${p.originalIndex}] ${p["Child Item Category"]} (${p.originalSpec})`;
+          if (!partCounts[key]) {
+            partCounts[key] = {
+              index: p.originalIndex,
+              category: p["Child Item Category"],
+              spec: p.originalSpec,
+              qty: 0
+            };
+          }
+          partCounts[key].qty += 1;
+        });
+
+        return {
+          sheetNo: idx + 1,
+          width: s.width,
+          length: s.length,
+          usedArea: s.usedArea,
+          totalArea: s.width * s.length,
+          utilization: (s.usedArea / (s.width * s.length)) * 100,
+          parts: Object.values(partCounts)
+        };
+      });
 
       report.summary.push({
         title: `Project: ${group.name} (${group.id})`,
         description: `This project requires the following components. After applying manufacturing margins, these parts can be grouped into the following HR sheet sizes.`,
         procurement: `Recommended procurement quantity:\n${procurementLines}`,
+        sheetLayoutDetails,
+        sheets,
         details: group.parts.map(p => ({
           "Item Specification": p.originalSpec,
           "Original Dimensions": `${p.originalL} × ${p.originalW}`,
           "Final Marginal Dimensions": `${p.adjustedL} × ${p.adjustedW}`,
           "Final Area": `${(p.area / 1000000).toFixed(3)} m²`,
           "Quantity Required": p.qty,
-          "Recommended HR Sheet": `${p.recommendedSheet.width} × ${p.recommendedSheet.length}`
+          "Recommended HR Sheet": `${p.recommendedSheet.width} × ${p.recommendedSheet.length}`,
+          "originalIndex": p.originalIndex,
+          "category": p["Child Item Category"]
         }))
       });
     });
 
-    // Calculate total wastage
+    // Compute aggregate wastage metrics across all sheets processed in this run
     nestedSheets.forEach(s => {
       report.wastageSummary.totalArea += s.width * s.length;
       report.wastageSummary.usedArea += s.usedArea;

@@ -1,4 +1,12 @@
+/**
+ * scratch/test_nesting.js
+ * 
+ * Local integration test runner. Evaluates sheet nesting algorithms
+ * against a mock set of component requirements without invoking Excel parsers.
+ */
+
 import { OptimizationController } from "../src/main.js";
+import { PremiumReporter } from "../src/utils/reporter.js";
 
 const sampleData = [
   {
@@ -37,27 +45,7 @@ async function runTest() {
   const controller = new OptimizationController();
   const report = await controller.processComponents(sampleData);
 
-  console.log("==================================================");
-  console.log("INDUSTRIAL SHEET OPTIMIZATION REPORT");
-  console.log("==================================================\n");
-
-  report.summary.forEach(project => {
-    console.log(project.title);
-    console.log("--------------------------------------------------");
-    console.log(project.description);
-    console.log("\nComponents Details:");
-    console.table(project.details);
-    console.log("\n" + project.procurement);
-    console.log("\n");
-  });
-
-  console.log("==================================================");
-  console.log("UTILIZATION & WASTAGE SUMMARY");
-  console.log("--------------------------------------------------");
-  console.log(`Total Sheet Area: ${(report.wastageSummary.totalArea / 1000000).toFixed(2)} m²`);
-  console.log(`Used Area:        ${(report.wastageSummary.usedArea / 1000000).toFixed(2)} m²`);
-  console.log(`Total Wastage:    ${report.wastageSummary.wastage}`);
-  console.log("==================================================");
+  PremiumReporter.printFullReport(report);
 }
 
 runTest();
